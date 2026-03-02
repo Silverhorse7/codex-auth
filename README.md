@@ -10,14 +10,28 @@ pip install codex-auth
 
 ## Usage
 
-### Monkey-patch (one liner)
-
 ```python
 import codex_auth
 
 from openai import OpenAI
 client = OpenAI()  # no API key needed
 
+response = client.responses.create(
+    model="gpt-5.1-codex-mini",
+    input="Write a one-sentence bedtime story about a unicorn.",
+)
+print(response.output_text)
+```
+
+A browser window opens on first run for OAuth. Tokens are cached in
+`~/.codex-auth/auth.json` and refreshed automatically.
+
+Both streaming and non-streaming calls work — the library handles the
+Codex endpoint's streaming requirement transparently.
+
+### Streaming
+
+```python
 stream = client.responses.create(
     model="gpt-5.1-codex-mini",
     input="Write a hello-world in Rust.",
@@ -28,10 +42,22 @@ for event in stream:
         print(event.response.output_text)
 ```
 
-A browser window opens on first run for OAuth. Tokens are cached in
-`~/.codex-auth/auth.json` and refreshed automatically.
+### `chat.completions` compatibility
+
+Existing code using `chat.completions` works too — requests are converted
+to the Responses API format automatically:
+
+```python
+response = client.chat.completions.create(
+    model="gpt-5.1-codex-mini",
+    messages=[{"role": "user", "content": "Hello!"}],
+)
+print(response.choices[0].message.content)
+```
 
 ### Explicit client
+
+If you prefer not to monkey-patch:
 
 ```python
 from codex_auth import CodexClient
@@ -40,7 +66,7 @@ client = CodexClient()            # browser / device auth
 client = CodexClient(token="…")   # existing token
 ```
 
-### Async
+Async variant:
 
 ```python
 from codex_auth import AsyncCodexClient
@@ -66,8 +92,8 @@ A custom [httpx transport](https://www.python-httpx.org/advanced/transports/) in
 
 1. Rewrite URLs to the Codex backend (`chatgpt.com/backend-api/codex/responses`)
 2. Convert `chat.completions` payloads to the Responses API format
-3. Inject OAuth bearer tokens and Codex-specific headers
-4. Refresh tokens transparently
+3. Buffer SSE responses for non-streaming callers
+4. Inject OAuth bearer tokens and refresh them transparently
 
 Browser-based PKCE auth is used on desktop; device-code flow on headless/SSH.
 
