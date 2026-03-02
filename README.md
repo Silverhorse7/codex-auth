@@ -1,6 +1,6 @@
 # codex-auth
 
-Drop-in OAuth for the OpenAI Python SDK — use the ChatGPT Codex API with your Pro/Plus account instead of an API key.
+Drop-in OAuth for the OpenAI Python SDK — use the ChatGPT Codex API with your Pro/Plus account instead of an API key. Obviously this is for personal usage users, not for production or so.
 
 ## Install
 
@@ -101,6 +101,3 @@ Browser-based PKCE auth is used on desktop; device-code flow on headless/SSH.
 
 `~/.codex-auth/auth.json` (mode `0600`). Override with `CODEX_AUTH_TOKEN` env var.
 
-## License
-
-MIT
