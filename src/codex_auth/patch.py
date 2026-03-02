@@ -45,7 +45,7 @@ def _chat_completions_to_responses(body: dict) -> dict:
         "store": False,
         "stream": True,
     }
-    for key in ("temperature", "max_output_tokens", "top_p"):
+    for key in ("temperature", "max_output_tokens", "top_p", "tools"):
         if key in body:
             result[key] = body[key]
     if "max_tokens" in body and "max_output_tokens" not in body:
@@ -57,9 +57,52 @@ def _normalize_responses_body(body: dict) -> dict:
     body = body.copy()
     if isinstance(body.get("input"), str):
         body["input"] = [{"role": "user", "content": body["input"]}]
+    body.setdefault("instructions", "You are a helpful assistant.")
     body["store"] = False
     body["stream"] = True
     return body
+
+
+def _extract_sse_response(raw: bytes) -> dict | None:
+    """Parse SSE bytes and return the response dict from the completed event."""
+    for line in raw.decode("utf-8", errors="replace").splitlines():
+        if not line.startswith("data: ") or line == "data: [DONE]":
+            continue
+        try:
+            event = json.loads(line[6:])
+            if event.get("type") == "response.completed":
+                return event.get("response")
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
+def _responses_to_chat_completion(resp: dict) -> dict:
+    """Convert a Responses API response object to chat.completions format."""
+    status = resp.get("status", "completed")
+    return {
+        "id": resp.get("id", ""),
+        "object": "chat.completion",
+        "created": int(resp.get("created_at", 0)),
+        "model": resp.get("model", ""),
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": resp.get("output_text", "")},
+            "finish_reason": "stop" if status == "completed" else "length",
+        }],
+        "usage": resp.get("usage", {}),
+    }
+
+
+def _buffer_sse(raw: bytes, as_chat_completion: bool = False) -> httpx.Response | None:
+    """Turn raw SSE bytes into a JSON httpx.Response, or None on failure."""
+    resp = _extract_sse_response(raw)
+    if resp is None:
+        return None
+    if as_chat_completion:
+        resp = _responses_to_chat_completion(resp)
+    body = json.dumps(resp).encode()
+    return httpx.Response(200, headers={"content-type": "application/json"}, content=body)
 
 
 def _ensure_valid_auth(
@@ -80,6 +123,17 @@ def _ensure_valid_auth(
             auth = authenticate(force=True)
 
     return auth
+
+
+def _is_codex_path(path: str) -> bool:
+    return "/chat/completions" in path or "/v1/responses" in path
+
+
+def _user_wants_stream(request: httpx.Request) -> bool:
+    try:
+        return json.loads(request.content).get("stream") is True
+    except Exception:
+        return False
 
 
 def _rewrite_request(request: httpx.Request, auth: AuthTokens) -> httpx.Request:
@@ -137,7 +191,18 @@ class CodexTransport(httpx.BaseTransport):
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         self._auth = _ensure_valid_auth(self._auth, self._store)
-        return self._wrapped.handle_request(_rewrite_request(request, self._auth))
+        path = request.url.path
+        needs_buffer = _is_codex_path(path) and not _user_wants_stream(request)
+        is_chat = "/chat/completions" in path
+
+        response = self._wrapped.handle_request(_rewrite_request(request, self._auth))
+
+        if needs_buffer and response.status_code == 200:
+            buffered = _buffer_sse(response.read(), as_chat_completion=is_chat)
+            if buffered is not None:
+                return buffered
+
+        return response
 
     def close(self) -> None:
         self._wrapped.close()
@@ -156,9 +221,20 @@ class AsyncCodexTransport(httpx.AsyncBaseTransport):
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         self._auth = _ensure_valid_auth(self._auth, self._store)
-        return await self._wrapped.handle_async_request(
+        path = request.url.path
+        needs_buffer = _is_codex_path(path) and not _user_wants_stream(request)
+        is_chat = "/chat/completions" in path
+
+        response = await self._wrapped.handle_async_request(
             _rewrite_request(request, self._auth)
         )
+
+        if needs_buffer and response.status_code == 200:
+            buffered = _buffer_sse(await response.aread(), as_chat_completion=is_chat)
+            if buffered is not None:
+                return buffered
+
+        return response
 
     async def aclose(self) -> None:
         await self._wrapped.aclose()
